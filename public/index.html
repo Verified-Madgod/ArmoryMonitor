@@ -9,29 +9,16 @@
 <body>
   <div id="auth">
     <h1>Torn City Armory Tracker</h1>
-    <div id="login-form">
-      <h2>Login</h2>
-      <input type="text" id="username" placeholder="Username">
-      <input type="password" id="password" placeholder="Password">
-      <button onclick="login()">Login</button>
-      <button onclick="showRegister()">Register</button>
-    </div>
-    <div id="register-form" style="display: none;">
-      <h2>Register</h2>
-      <input type="text" id="reg-username" placeholder="Username">
-      <input type="password" id="reg-password" placeholder="Password">
-      <button onclick="register()">Register</button>
-      <button onclick="showLogin()">Back to Login</button>
+    <div id="api-key-form">
+      <h2>Enter API Key</h2>
+      <input type="text" id="api-key" placeholder="Torn API Key">
+      <input type="text" id="faction-name" placeholder="Faction Name (optional)">
+      <button onclick="addApiKey()">Add API Key</button>
     </div>
   </div>
   <div id="app" style="display: none;">
     <h1>Armory Usage</h1>
-    <div>
-      <h2>Add API Key</h2>
-      <input type="text" id="api-key" placeholder="Torn API Key">
-      <input type="text" id="faction-name" placeholder="Faction Name">
-      <button onclick="addApiKey()">Add API Key</button>
-    </div>
+    <button onclick="fetchArmoryData()">Refresh Data</button>
     <table id="armory-table">
       <thead>
         <tr>
