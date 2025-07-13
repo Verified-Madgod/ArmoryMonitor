@@ -27,12 +27,7 @@
   "crons": [
     {
       "path": "/api/cron-armory",
-      "schedule": "*/5 * strokedString()}</td>
-      `;
-      tbody.appendChild(tr);
-    });
-  } else {
-    alert(data.error);
-    localStorage.removeItem('apiKey');
-    document.getElementById('auth').style.display = 'block';
-    document.getElementById('app').style­
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}
