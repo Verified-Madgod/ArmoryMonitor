@@ -159,3 +159,50 @@ app.get('/api/armory', authenticateToken, async (req, res) => {
 
 // Vercel serverless function export
 module.exports = app;
+
+// Background task to update armory data every 5 minutes
+setInterval(async () => {
+  db.all(`SELECT * FROM api_keys`, async (err, keys) => {
+    if (err) return console.error(err);
+    for (const key of keys) {
+      const response = await fetch(`${TORN_API_BASE}/faction/?selections=armorynews&key=${key.api_key}`);
+      const data = await response.json();
+      if (data.error) continue;
+
+      const armoryNews = data.armorynews;
+      const usageUpdates = {};
+
+      for (const newsId in armoryNews) {
+        const { news, timestamp } = armoryNews[newsId];
+        const match = news.match(/^(\w+) (?:used one of the faction's|gave (\d+)x) (.+?) (?:items|to themselves)/);
+        if (!match) continue;
+
+        const username = match[1];
+        const quantity = parseInt(match[2] || 1);
+        const item = match[3].toLowerCase().replace(/\s+/g, '_');
+
+        if (!usageUpdates[username]) {
+          usageUpdates[username] = { username, api_key_id: key.id };
+          usageUpdates[username][item] = 0;
+        }
+        usageUpdates[username][item] += quantity;
+      }
+
+      for (const username in usageUpdates) {
+        const update = usageUpdates[username];
+        db.run(
+          `INSERT INTO armory_usage (api_key_id, username, ${Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').join(', ')}, last_updated)
+           VALUES (?, ?, ${Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').map(() => '?').join(', ')}, ?)
+           ON CONFLICT(api_key_id, username) DO UPDATE SET
+           ${Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').map(k => `${k} = ${k} + excluded.${k}`).join(', ')},
+           last_updated = excluded.last_updated`,
+          [update.api_key_id, username, ...Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').map(k => update[k]), Math.floor(Date.now() / 1000)],
+          (err) => {
+            if (err) console.error(err);
+            updateMarketValues(update.api_key_id, username);
+          }
+        );
+      }
+    }
+  });
+}, 5 * 60 * 1000); // Run every 5 minutes
