@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Torn City Armory Tracker</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="auth">
+    <h1>Torn City Armory Tracker</h1>
+    <div id="login-form">
+      <h2>Login</h2>
+      <input type="text" id="username" placeholder="Username">
+      <input type="password" id="password" placeholder="Password">
+      <button onclick="login()">Login</button>
+      <button onclick="showRegister()">Register</button>
+    </div>
+    <div id="register-form" style="display: none;">
+      <h2>Register</h2>
+      <input type="text" id="reg-username" placeholder="Username">
+      <input type="password" id="reg-password" placeholder="Password">
+      <button onclick="register()">Register</button>
+      <button onclick="showLogin()">Back to Login</button>
+    </div>
+  </div>
+  <div id="app" style="display: none;">
+    <h1>Armory Usage</h1>
+    <div>
+      <h2>Add API Key</h2>
+      <input type="text" id="api-key" placeholder="Torn API Key">
+      <input type="text" id="faction-name" placeholder="Faction Name">
+      <button onclick="addApiKey()">Add API Key</button>
+    </div>
+    <table id="armory-table">
+      <thead>
+        <tr>
+          <th>Faction</th>
+          <th>Username</th>
+          <th>Xanax</th>
+          <th>Beer</th>
+          <th>Empty Blood Bags</th>
+          <th>Filled Blood Bags</th>
+          <th>Lollipop</th>
+          <th>First Aid Kit</th>
+          <th>Total Value</th>
+        </tr>
+      </thead>
+      <tbody id="armory-body"></tbody>
+    </table>
+  </div>
+  <script src="/script.js"></script>
+</body>
+</html>
