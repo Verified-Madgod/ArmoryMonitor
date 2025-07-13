@@ -1,28 +1,28 @@
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-const fetch = require('node-fetch'); // Add for API calls
+const fetch = require('node-fetch');
 const app = express();
 app.use(express.json());
 
-const SECRET_KEY = process.env.SECRET_KEY || 'your-secret-key';
 const TORN_API_BASE = 'https://api.torn.com';
 const db = new sqlite3.Database('armory.db');
 
+// Item IDs for market value lookups (from your previous context)
+const itemIds = {
+  xanax: 67,
+  beer: 10,
+  empty_blood_bags: 70,
+  filled_blood_bags: 71,
+  lollipop: 226,
+  first_aid_kit: 68
+};
+
 // Initialize database
 db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password TEXT
-  )`);
   db.run(`CREATE TABLE IF NOT EXISTS api_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
     api_key TEXT UNIQUE,
-    faction_name TEXT,
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    faction_name TEXT
   )`);
   db.run(`CREATE TABLE IF NOT EXISTS armory_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,45 +40,39 @@ db.serialize(() => {
   )`);
 });
 
-// Register user
-app.post('/api/register', async (req, res) => {
-  const { username, password } = req.body;
-  const hashedPassword = await bcrypt.hash(password, 10);
-  db.run(`INSERT INTO users (username, password) VALUES (?, ?)`, [username, hashedPassword], (err) => {
-    if (err) return res.status(400).json({ error: 'Username taken' });
-    res.json({ message: 'User registered' });
-  });
-});
+// Middleware to validate API key
+const authenticateApiKey = async (req, res, next) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey) return res.status(401).json({ error: 'No API key provided' });
 
-// Login
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
-  db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, user) => {
-    if (err || !user || !(await bcrypt.compare(password, user.password))) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    const token = jwt.sign({ username, userId: user.id }, SECRET_KEY, { expiresIn: '1h' });
-    res.json({ token });
-  });
-});
+  // Validate API key against database
+  db.get(`SELECT * FROM api_keys WHERE api_key = ?`, [apiKey], async (err, key) => {
+    if (err || !key) return res.status(403).json({ error: 'Invalid API key' });
 
-// Middleware to verify token
-const authenticateToken = (req, res, next) => {
-  const token = req.headers['authorization']?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'No token provided' });
-  jwt.verify(token, SECRET_KEY, (err, decoded) => {
-    if (err) return res.status(403).json({ error: 'Invalid token' });
-    req.user = decoded;
+    // Verify API key with Torn API
+    const response = await fetch(`${TORN_API_BASE}/faction/?selections=armorynews&key=${apiKey}`);
+    const data = await response.json();
+    if (data.error) return res.status(403).json({ error: 'Invalid or unauthorized API key' });
+
+    req.apiKey = apiKey;
+    req.factionName = key.faction_name;
+    req.apiKeyId = key.id;
     next();
   });
 };
 
 // Add API key
-app.post('/api/api-key', authenticateToken, (req, res) => {
+app.post('/api/api-key', async (req, res) => {
   const { api_key, faction_name } = req.body;
+
+  // Verify API key with Torn API
+  const response = await fetch(`${TORN_API_BASE}/faction/?selections=armorynews&key=${api_key}`);
+  const data = await response.json();
+  if (data.error) return res.status(400).json({ error: 'Invalid Torn API key' });
+
   db.run(
-    `INSERT INTO api_keys (user_id, api_key, faction_name) VALUES (?, ?, ?)`,
-    [req.user.userId, api_key, faction_name],
+    `INSERT INTO api_keys (api_key, faction_name) VALUES (?, ?)`,
+    [api_key, faction_name || 'Unknown Faction'],
     (err) => {
       if (err) return res.status(400).json({ error: 'API key already exists' });
       res.json({ message: 'API key added' });
@@ -86,77 +80,101 @@ app.post('/api/api-key', authenticateToken, (req, res) => {
   );
 });
 
-// Fetch and process armory data
-app.get('/api/armory', authenticateToken, async (req, res) => {
+// Update market values
+async function updateMarketValues(apiKeyId, username, apiKey) {
+  let totalValue = 0;
+  for (const item in itemIds) {
+    const response = await fetch(`${TORN_API_BASE}/v2/market/${itemIds[item]}/itemmarket?offset=0&key=${apiKey}`);
+    const data = await response.json();
+    if (data.error) continue;
+    const marketPrice = data.itemmarket[0]?.cost || 0;
+    const quantity = await new Promise((resolve) => {
+      db.get(`SELECT ${item} FROM armory_usage WHERE api_key_id = ? AND username = ?`, [apiKeyId, username], (err, row) => {
+        resolve(row ? row[item] : 0);
+      });
+    });
+    totalValue += marketPrice * quantity;
+  }
+  db.run(`UPDATE armory_usage SET total_value = ? WHERE api_key_id = ? AND username = ?`, [totalValue, apiKeyId, username]);
+}
+
+// Fetch and process armory data (used by both user and cron)
+async function fetchArmoryData(apiKey, res = null) {
   try {
-    // Get user's API keys
-    db.all(`SELECT * FROM api_keys WHERE user_id = ?`, [req.user.userId], async (err, keys) => {
-      if (err) return res.status(500).json({ error: err.message });
+    db.all(`SELECT * FROM api_keys WHERE api_key = ?`, [apiKey], async (err, keys) => {
+      if (err || !keys.length) {
+        if (res) res.status(500).json({ error: 'API key not found' });
+        return;
+      }
 
-      const armoryData = [];
-      for (const key of keys) {
-        // Fetch armory news from Torn API
-        const response = await fetch(`${TORN_API_BASE}/faction/?selections=armorynews&key=${key.api_key}`);
-        const data = await response.json();
-        if (data.error) continue; // Skip invalid API keys
+      const key = keys[0];
+      const response = await fetch(`${TORN_API_BASE}/faction/?selections=armorynews&key=${key.api_key}`);
+      const data = await response.json();
+      if (data.error) {
+        if (res) res.status(500).json({ error: data.error });
+        return;
+      }
 
-        const armoryNews = data.armorynews;
-        const usageUpdates = {};
+      const armoryNews = data.armorynews;
+      const usageUpdates = {};
 
-        // Process armory news
-        for (const newsId in armoryNews) {
-          const { news, timestamp } = armoryNews[newsId];
-          const match = news.match(/^(\w+) (?:used one of the faction's|gave (\d+)x) (.+?) (?:items|to themselves)/);
-          if (!match) continue;
+      // Process armory news
+      for (const newsId in armoryNews) {
+        const { news, timestamp } = armoryNews[newsId];
+        const match = news.match(/^(\w+) (?:used one of the faction's|gave (\d+)x) (.+?) (?:items|to themselves)/);
+        if (!match) continue;
 
-          const username = match[1];
-          const quantity = parseInt(match[2] || 1);
-          const item = match[3].toLowerCase().replace(/\s+/g, '_');
+        const username = match[1];
+        const quantity = parseInt(match[2] || 1);
+        const item = match[3].toLowerCase().replace(/\s+/g, '_');
 
-          if (!usageUpdates[username]) {
-            usageUpdates[username] = { username, api_key_id: key.id };
-            usageUpdates[username][item] = 0;
+        if (!usageUpdates[username]) {
+          usageUpdates[username] = { username, api_key_id: key.id };
+          usageUpdates[username][item] = 0;
+        }
+        usageUpdates[username][item] += quantity;
+      }
+
+      // Update database
+      for (const username in usageUpdates) {
+        const update = usageUpdates[username];
+        db.run(
+          `INSERT INTO armory_usage (api_key_id, username, ${Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').join(', ')}, last_updated)
+           VALUES (?, ?, ${Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').map(() => '?').join(', ')}, ?)
+           ON CONFLICT(api_key_id, username) DO UPDATE SET
+           ${Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').map(k => `${k} = ${k} + excluded.${k}`).join(', ')},
+           last_updated = excluded.last_updated`,
+          [update.api_key_id, username, ...Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').map(k => update[k]), Math.floor(Date.now() / 1000)],
+          (err) => {
+            if (err) console.error(err);
+            updateMarketValues(update.api_key_id, username, key.api_key);
           }
-          usageUpdates[username][item] += quantity;
-        }
+        );
+      }
 
-        // Update database
-        for (const username in usageUpdates) {
-          const update = usageUpdates[username];
-          db.run(
-            `INSERT INTO armory_usage (api_key_id, username, ${Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').join(', ')}, last_updated)
-             VALUES (?, ?, ${Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').map(() => '?').join(', ')}, ?)
-             ON CONFLICT(api_key_id, username) DO UPDATE SET
-             ${Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').map(k => `${k} = ${k} + excluded.${k}`).join(', ')},
-             last_updated = excluded.last_updated`,
-            [update.api_key_id, username, ...Object.keys(update).filter(k => k !== 'username' && k !== 'api_key_id').map(k => update[k]), Math.floor(Date.now() / 1000)],
-            (err) => {
-              if (err) console.error(err);
-            }
-          );
-        }
-
-        // Fetch current armory data
+      // Fetch and return armory data if requested by user
+      if (res) {
         db.all(
           `SELECT au.*, ak.faction_name FROM armory_usage au
            JOIN api_keys ak ON au.api_key_id = ak.id
-           WHERE ak.user_id = ?`,
-          [req.user.userId],
+           WHERE ak.api_key = ?`,
+          [apiKey],
           (err, rows) => {
             if (err) return res.status(500).json({ error: err.message });
-            armoryData.push(...rows);
-            if (armoryData.length === keys.length) {
-              res.json(armoryData);
-            }
+            res.json(rows);
           }
         );
       }
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    if (res) res.status(500).json({ error: error.message });
   }
+}
+
+// Fetch armory data (user-initiated or cron)
+app.get('/api/armory', authenticateApiKey, async (req, res) => {
+  await fetchArmoryData(req.apiKey, res);
 });
 
 // Vercel serverless function export
 module.exports = app;
-
